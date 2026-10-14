@@ -6,20 +6,80 @@ const DEFAULT_BACKENDS = [
   { host: 'localhost', port: 3002 },
   { host: 'localhost', port: 3003 }
 ];
+const DEFAULT_HEALTH_CHECK_PATH = '/health';
+const DEFAULT_HEALTH_CHECK_INTERVAL = 5000;
+const DEFAULT_HEALTH_CHECK_TIMEOUT = 2000;
 
 function createLoadBalancer({
   port = DEFAULT_PORT,
-  backends = DEFAULT_BACKENDS
+  backends = DEFAULT_BACKENDS,
+  healthCheckPath = DEFAULT_HEALTH_CHECK_PATH,
+  healthCheckInterval = DEFAULT_HEALTH_CHECK_INTERVAL,
+  healthCheckTimeout = DEFAULT_HEALTH_CHECK_TIMEOUT
 } = {}) {
   if (!Array.isArray(backends) || backends.length === 0) {
     throw new Error('At least one backend is required');
   }
 
+  const backendStates = backends.map((backend) => ({
+    ...backend,
+    healthy: true,
+    checking: false
+  }));
   let nextBackend = 0;
 
+  function getHealthyBackends() {
+    return backendStates.filter((backend) => backend.healthy);
+  }
+
+  function checkBackend(backend) {
+    if (backend.checking) {
+      return;
+    }
+
+    backend.checking = true;
+    const healthRequest = http.request(
+      {
+        hostname: backend.host,
+        port: backend.port,
+        path: healthCheckPath,
+        method: 'GET'
+      },
+      (healthResponse) => {
+        const isHealthy =
+          healthResponse.statusCode >= 200 && healthResponse.statusCode < 300;
+        backend.healthy = isHealthy;
+        backend.checking = false;
+        healthResponse.resume();
+      }
+    );
+
+    healthRequest.setTimeout(healthCheckTimeout, () => {
+      healthRequest.destroy();
+    });
+
+    healthRequest.on('error', () => {
+      backend.healthy = false;
+      backend.checking = false;
+    });
+
+    healthRequest.end();
+  }
+
+  function checkAllBackends() {
+    backendStates.forEach(checkBackend);
+  }
+
   const server = http.createServer((request, response) => {
-    const backend = backends[nextBackend];
-    nextBackend = (nextBackend + 1) % backends.length;
+    const healthyBackends = getHealthyBackends();
+    if (healthyBackends.length === 0) {
+      response.writeHead(503, { 'Content-Type': 'text/plain' });
+      response.end('No healthy backends available');
+      return;
+    }
+
+    const backend = healthyBackends[nextBackend % healthyBackends.length];
+    nextBackend = (nextBackend + 1) % healthyBackends.length;
 
     const proxyRequest = http.request(
       {
@@ -36,19 +96,32 @@ function createLoadBalancer({
     );
 
     proxyRequest.on('error', () => {
+      backend.healthy = false;
       if (!response.headersSent) {
         response.writeHead(502, { 'Content-Type': 'text/plain' });
+        response.end('Bad Gateway');
+      } else {
+        response.destroy();
       }
-      response.end('Bad Gateway');
     });
 
     request.pipe(proxyRequest);
   });
 
+  checkAllBackends();
+  const healthCheckTimer = setInterval(checkAllBackends, healthCheckInterval);
+  healthCheckTimer.unref();
+
+  const close = (callback) => {
+    clearInterval(healthCheckTimer);
+    server.close(callback);
+  };
+
   return {
     port,
     backends,
-    server
+    server,
+    close
   };
 }
 
@@ -66,5 +139,8 @@ if (require.main === module) {
 module.exports = {
   DEFAULT_PORT,
   DEFAULT_BACKENDS,
+  DEFAULT_HEALTH_CHECK_PATH,
+  DEFAULT_HEALTH_CHECK_INTERVAL,
+  DEFAULT_HEALTH_CHECK_TIMEOUT,
   createLoadBalancer
 };

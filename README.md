@@ -3,9 +3,10 @@
 A small HTTP reverse proxy written with Node.js. The project is being built
 incrementally to demonstrate common load-balancing strategies.
 
-## Current version: v1.0 — Round Robin
+## Current version: v2.0 — Health Checks and Failover
 
-Version 1.0 is the working baseline.
+Version 2.0 builds on the v1.0 round-robin baseline by checking backend
+availability and routing only to healthy backends.
 
 Requests are distributed sequentially across the configured backends:
 
@@ -19,9 +20,8 @@ The implementation stores one index and advances it with the modulo operator:
 nextIndex = (nextIndex + 1) % backends.length
 ```
 
-This version proves that the reverse proxy can accept a client request, select
-a backend, forward the request, and pipe the backend response back to the
-client.
+The reverse proxy accepts a client request, selects a healthy backend, forwards
+the request, and pipes the backend response back to the client.
 
 ### Default configuration
 
@@ -31,8 +31,18 @@ client.
 | Backend 1 | `localhost:3001` |
 | Backend 2 | `localhost:3002` |
 | Backend 3 | `localhost:3003` |
+| Health endpoint | `GET /health` |
+| Health-check interval | `5 seconds` |
+| Health-check timeout | `2 seconds` |
 
-If a backend cannot be reached, the load balancer returns `502 Bad Gateway`.
+Backends that fail a health check are temporarily removed from rotation.
+Healthy backends continue receiving traffic, and failed backends are
+automatically added back after a later health check succeeds. If a request
+fails before the next health check, that backend is removed immediately.
+
+If no backend is healthy, the load balancer returns `503 Service Unavailable`.
+If a selected backend fails while handling a request, the load balancer returns
+`502 Bad Gateway`.
 
 ## Requirements
 
@@ -85,13 +95,23 @@ curl.exe http://localhost:3000/
 The responses should rotate through backends 3001, 3002, 3003, and then 3001
 again. This verifies the round-robin behavior.
 
-To verify the failure response, stop one backend with `Ctrl+C` and continue
-sending requests. When the stopped backend is selected, the proxy should
-return `502 Bad Gateway`.
+To verify failover, stop one backend with `Ctrl+C`. Wait for the next health
+check, then send requests through port `3000`. Requests should continue to be
+served by the remaining healthy backends. Restart the stopped backend and
+confirm that it returns to rotation after a successful `/health` check.
+
+To verify the all-backends-down behavior, stop all three backends, wait for a
+health-check cycle, and run:
+
+```powershell
+curl.exe -i http://localhost:3000/
+```
+
+The response should have status `503 Service Unavailable`.
 
 ## Analytics and observability plan
 
-The current v1.0 implementation does not collect analytics yet. The best
+The current v2.0 implementation does not collect analytics yet. The best
 approach is to add observability in stages, without mixing it into the routing
 algorithm:
 
@@ -125,7 +145,7 @@ authorization headers, request bodies, or other sensitive data.
 
 ## Roadmap
 
-### v1.0: Round Robin (current)
+### v1.0: Round Robin (complete)
 
 - Distribute requests sequentially: A → B → C → A.
 - Learn basic state management with one current-index integer.
@@ -140,7 +160,8 @@ authorization headers, request bodies, or other sensitive data.
 - Learn asynchronous background tasks, failure detection, and dynamic pool
   updates.
 
-This version is planned but is intentionally not implemented yet.
+This version is implemented. Health checks run every five seconds by default,
+with a two-second timeout.
 
 ### v3.0: Least Connections
 
@@ -159,5 +180,5 @@ This version is planned but is intentionally not implemented yet.
 
 ## Project status
 
-Only v1.0 is currently in scope. The later versions document the intended
+v2.0 is currently in scope. Versions 3.0 and 4.0 document the intended
 learning path and are not promises that those features are already available.
