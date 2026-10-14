@@ -3,27 +3,22 @@
 A small HTTP reverse proxy written with Node.js. The project is being built
 incrementally to demonstrate common load-balancing strategies.
 
-## Current version: v3.0 — Least Connections
+## Current version: v4.0 — IP Hashing and Sticky Sessions
 
-Version 3.0 builds on v2.0 by routing each request to the healthy backend with
-the fewest active requests.
+Version 4.0 builds on v2.0 and v3.0 by hashing each client's IP address to
+select a backend. Requests from the same client are routed to the same healthy
+backend while that backend remains available.
 
-When healthy backends have the same number of active requests, a round-robin
-tie-breaker distributes requests between them:
-
-```text
-Backend A -> Backend B -> Backend C -> Backend A
-```
-
-The implementation tracks an active-request count for every backend:
+The client IP is hashed with SHA-256 and mapped to the current healthy backend
+list:
 
 ```text
-backend = healthy backend with the smallest activeRequests
+backendIndex = sha256(clientIp) % healthyBackends.length
 ```
 
-The reverse proxy accepts a client request, selects the least-connected
-healthy backend, increments its counter, forwards the request, and decrements
-the counter when the response finishes or the client connection closes.
+This version still tracks active requests for observability, but active-request
+counts no longer determine routing. The reverse proxy forwards all requests
+from a client to its hashed backend.
 
 ### Default configuration
 
@@ -37,15 +32,17 @@ the counter when the response finishes or the client connection closes.
 | Health-check interval | `5 seconds` |
 | Health-check timeout | `2 seconds` |
 
-Backends that fail a health check are temporarily removed from rotation.
+Backends that fail a health check are temporarily removed from the hash pool.
 Healthy backends continue receiving traffic, and failed backends are
 automatically added back after a later health check succeeds. If a request
 fails before the next health check, that backend is removed immediately.
 
-If multiple healthy backends have the same lowest active-request count, the
-tie-breaker rotates through those backends. This preserves predictable
-distribution for short requests while allowing long-running requests to
-influence later routing decisions.
+If the hashed backend is unhealthy, the client is temporarily mapped to a
+healthy backend from the remaining pool. When the original backend recovers,
+the client may be mapped back to it. Adding or removing a backend can change
+the mapping for some clients because this implementation uses a simple modulo
+hash; a production implementation would use consistent hashing to minimize
+remapping.
 
 If no backend is healthy, the load balancer returns `503 Service Unavailable`.
 If a selected backend fails while handling a request, the load balancer returns
@@ -99,16 +96,15 @@ curl.exe http://localhost:3000/
 curl.exe http://localhost:3000/
 ```
 
-For short requests, responses should be distributed across the backends. To
-observe least-connections behavior, make one backend deliberately slow:
+Requests from the same client should consistently return from the same backend.
+To make the selected backend visible, give each backend a distinct response:
 
 ```powershell
-node -e "require('http').createServer((req,res)=>setTimeout(()=>res.end('slow backend 3001'),3000)).listen(3001)"
+node -e "require('http').createServer((req,res)=>{if(req.url==='/health')return res.end('ok');res.end('response from backend 3001')}).listen(3001)"
 ```
 
-Send concurrent requests while that backend is still processing. New
-requests should prefer the healthy backends with fewer active requests instead
-of blindly following a fixed sequence.
+Repeat the same request several times. The response should keep identifying the
+same backend. Requests from a different client IP will be hashed independently.
 
 To verify failover, stop one backend with `Ctrl+C`. Wait for the next health
 check, then send requests through port `3000`. Requests should continue to be
@@ -126,7 +122,7 @@ The response should have status `503 Service Unavailable`.
 
 ## Analytics and observability plan
 
-The current v3.0 implementation does not collect analytics yet. The best
+The current v4.0 implementation does not collect analytics yet. The best
 approach is to add observability in stages, without mixing it into the routing
 algorithm:
 
@@ -155,7 +151,7 @@ algorithm:
 For this project, the recommended first analytics milestone is structured
 JSON request logging followed by counters and latency histograms. This keeps
 the learning loop simple while making it possible to compare routing behavior
-as v2.0, v3.0, and v4.0 are introduced. Logs should not include cookies,
+as each version is introduced. Logs should not include cookies,
 authorization headers, request bodies, or other sensitive data.
 
 ## Roadmap
@@ -178,7 +174,7 @@ authorization headers, request bodies, or other sensitive data.
 This version is implemented. Health checks run every five seconds by default,
 with a two-second timeout.
 
-### v3.0: Least Connections (current)
+### v3.0: Least Connections (complete)
 
 - Route each request to the backend with the fewest active requests.
 - Increment a backend's connection count when a request starts.
@@ -189,14 +185,16 @@ with a two-second timeout.
 This version is implemented. It retains v2.0 health checks and failover while
 using active-request counts for routing.
 
-### v4.0: IP Hashing and Sticky Sessions
+### v4.0: IP Hashing and Sticky Sessions (current)
 
 - Read the client's IP address.
 - Hash the address to select a consistent backend.
 - Keep a client on the same backend for session-oriented applications.
 - Learn hashing and Layer 4/Layer 7 request data.
 
+This version is implemented. It uses the request socket's source IP and does
+not trust a client-supplied `X-Forwarded-For` header.
+
 ## Project status
 
-v3.0 is currently in scope. Version 4.0 documents the intended
-learning path and are not promises that those features are already available.
+v4.0 is currently in scope. All planned versions through v4.0 are implemented.

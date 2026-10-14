@@ -1,4 +1,5 @@
 const http = require('http');
+const crypto = require('crypto');
 
 const DEFAULT_PORT = 3000;
 const DEFAULT_BACKENDS = [
@@ -27,29 +28,22 @@ function createLoadBalancer({
     checking: false,
     activeRequests: 0
   }));
-  let tieBreakerIndex = 0;
-
   function getHealthyBackends() {
     return backendStates.filter((backend) => backend.healthy);
   }
 
-  function selectBackend() {
+  function hashClientIp(clientIp) {
+    const digest = crypto.createHash('sha256').update(clientIp).digest();
+    return digest.readUInt32BE(0);
+  }
+
+  function selectBackend(clientIp) {
     const healthyBackends = getHealthyBackends();
     if (healthyBackends.length === 0) {
       return null;
     }
 
-    const minimumActiveRequests = Math.min(
-      ...healthyBackends.map((backend) => backend.activeRequests)
-    );
-    const leastConnectedBackends = healthyBackends.filter(
-      (backend) => backend.activeRequests === minimumActiveRequests
-    );
-    const backend = leastConnectedBackends[
-      tieBreakerIndex % leastConnectedBackends.length
-    ];
-    tieBreakerIndex += 1;
-    return backend;
+    return healthyBackends[hashClientIp(clientIp) % healthyBackends.length];
   }
 
   function checkBackend(backend) {
@@ -91,7 +85,8 @@ function createLoadBalancer({
   }
 
   const server = http.createServer((request, response) => {
-    const backend = selectBackend();
+    const clientIp = request.socket.remoteAddress || 'unknown';
+    const backend = selectBackend(clientIp);
     if (!backend) {
       response.writeHead(503, { 'Content-Type': 'text/plain' });
       response.end('No healthy backends available');
@@ -159,7 +154,11 @@ function createLoadBalancer({
         port,
         healthy,
         activeRequests
-      }))
+      })),
+    getBackendForClientIp: (clientIp) => {
+      const backend = selectBackend(clientIp);
+      return backend ? { host: backend.host, port: backend.port } : null;
+    }
   };
 }
 
