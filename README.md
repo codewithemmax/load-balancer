@@ -3,22 +3,27 @@
 A small HTTP reverse proxy written with Node.js. The project is being built
 incrementally to demonstrate common load-balancing strategies.
 
-## Current version: v4.0 — IP Hashing and Sticky Sessions
+## Current version: v5.0 — Configurable Routing Strategies
 
-Version 4.0 builds on v2.0 and v3.0 by hashing each client's IP address to
-select a backend. Requests from the same client are routed to the same healthy
-backend while that backend remains available.
+Version 5.0 supports the v1, v3, and v4 routing strategies in one load
+balancer. Health checks and failover from v2 remain active for every strategy.
 
-The client IP is hashed with SHA-256 and mapped to the current healthy backend
-list:
+Available strategies:
 
 ```text
-backendIndex = sha256(clientIp) % healthyBackends.length
+round-robin       A -> B -> C -> A
+least-connections lowest active-request count
+ip-hash           sha256(clientIp) % healthyBackends.length
 ```
 
-This version still tracks active requests for observability, but active-request
-counts no longer determine routing. The reverse proxy forwards all requests
-from a client to its hashed backend.
+The default strategy is `ip-hash`, preserving v4 behavior. Configure another
+strategy when creating the load balancer:
+
+```js
+const loadBalancer = createLoadBalancer({
+  strategy: 'least-connections'
+});
+```
 
 ### Default configuration
 
@@ -31,18 +36,19 @@ from a client to its hashed backend.
 | Health endpoint | `GET /health` |
 | Health-check interval | `5 seconds` |
 | Health-check timeout | `2 seconds` |
+| Routing strategy | `ip-hash` |
 
-Backends that fail a health check are temporarily removed from the hash pool.
+Backends that fail a health check are temporarily removed from the routing
+pool.
 Healthy backends continue receiving traffic, and failed backends are
 automatically added back after a later health check succeeds. If a request
 fails before the next health check, that backend is removed immediately.
 
-If the hashed backend is unhealthy, the client is temporarily mapped to a
-healthy backend from the remaining pool. When the original backend recovers,
-the client may be mapped back to it. Adding or removing a backend can change
-the mapping for some clients because this implementation uses a simple modulo
-hash; a production implementation would use consistent hashing to minimize
-remapping.
+For `ip-hash`, if the hashed backend is unhealthy, the client is temporarily
+mapped to a healthy backend from the remaining pool. Adding or removing a
+backend can change the mapping for some clients because this implementation
+uses a simple modulo hash; a production implementation would use consistent
+hashing to minimize remapping.
 
 If no backend is healthy, the load balancer returns `503 Service Unavailable`.
 If a selected backend fails while handling a request, the load balancer returns
@@ -96,15 +102,25 @@ curl.exe http://localhost:3000/
 curl.exe http://localhost:3000/
 ```
 
-Requests from the same client should consistently return from the same backend.
-To make the selected backend visible, give each backend a distinct response:
+Select a strategy when creating the load balancer:
+
+```js
+createLoadBalancer({ strategy: 'round-robin' });
+createLoadBalancer({ strategy: 'least-connections' });
+createLoadBalancer({ strategy: 'ip-hash' });
+```
+
+The command-line server uses the default `ip-hash` strategy. To compare
+strategies programmatically, give each backend a distinct response:
 
 ```powershell
 node -e "require('http').createServer((req,res)=>{if(req.url==='/health')return res.end('ok');res.end('response from backend 3001')}).listen(3001)"
 ```
 
-Repeat the same request several times. The response should keep identifying the
-same backend. Requests from a different client IP will be hashed independently.
+Repeat requests and change the `strategy` value between runs. With
+`round-robin`, responses rotate; with `least-connections`, long-running
+requests influence selection; with `ip-hash`, the same client stays on the
+same backend while the healthy pool is unchanged.
 
 To verify failover, stop one backend with `Ctrl+C`. Wait for the next health
 check, then send requests through port `3000`. Requests should continue to be
@@ -122,7 +138,7 @@ The response should have status `503 Service Unavailable`.
 
 ## Analytics and observability plan
 
-The current v4.0 implementation does not collect analytics yet. The best
+The current v5.0 implementation does not collect analytics yet. The best
 approach is to add observability in stages, without mixing it into the routing
 algorithm:
 
@@ -185,7 +201,7 @@ with a two-second timeout.
 This version is implemented. It retains v2.0 health checks and failover while
 using active-request counts for routing.
 
-### v4.0: IP Hashing and Sticky Sessions (current)
+### v4.0: IP Hashing and Sticky Sessions (complete)
 
 - Read the client's IP address.
 - Hash the address to select a consistent backend.
@@ -195,6 +211,13 @@ using active-request counts for routing.
 This version is implemented. It uses the request socket's source IP and does
 not trust a client-supplied `X-Forwarded-For` header.
 
+### v5.0: Configurable Routing Strategies (current)
+
+- Select `round-robin`, `least-connections`, or `ip-hash`.
+- Reuse the same health-check and failover behavior for every strategy.
+- Compare routing strategies without changing the proxy implementation.
+- Default to `ip-hash` for backward compatibility with v4.0.
+
 ## Project status
 
-v4.0 is currently in scope. All planned versions through v4.0 are implemented.
+v5.0 is currently in scope. All planned versions through v5.0 are implemented.

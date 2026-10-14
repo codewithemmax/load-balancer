@@ -10,16 +10,29 @@ const DEFAULT_BACKENDS = [
 const DEFAULT_HEALTH_CHECK_PATH = '/health';
 const DEFAULT_HEALTH_CHECK_INTERVAL = 5000;
 const DEFAULT_HEALTH_CHECK_TIMEOUT = 2000;
+const DEFAULT_STRATEGY = 'ip-hash';
+const ROUTING_STRATEGIES = [
+  'round-robin',
+  'least-connections',
+  'ip-hash'
+];
 
 function createLoadBalancer({
   port = DEFAULT_PORT,
   backends = DEFAULT_BACKENDS,
   healthCheckPath = DEFAULT_HEALTH_CHECK_PATH,
   healthCheckInterval = DEFAULT_HEALTH_CHECK_INTERVAL,
-  healthCheckTimeout = DEFAULT_HEALTH_CHECK_TIMEOUT
+  healthCheckTimeout = DEFAULT_HEALTH_CHECK_TIMEOUT,
+  strategy = DEFAULT_STRATEGY
 } = {}) {
   if (!Array.isArray(backends) || backends.length === 0) {
     throw new Error('At least one backend is required');
+  }
+  if (!ROUTING_STRATEGIES.includes(strategy)) {
+    throw new Error(
+      `Unknown routing strategy "${strategy}". ` +
+        `Expected one of: ${ROUTING_STRATEGIES.join(', ')}`
+    );
   }
 
   const backendStates = backends.map((backend) => ({
@@ -28,6 +41,8 @@ function createLoadBalancer({
     checking: false,
     activeRequests: 0
   }));
+  let roundRobinIndex = 0;
+
   function getHealthyBackends() {
     return backendStates.filter((backend) => backend.healthy);
   }
@@ -41,6 +56,25 @@ function createLoadBalancer({
     const healthyBackends = getHealthyBackends();
     if (healthyBackends.length === 0) {
       return null;
+    }
+
+    if (strategy === 'round-robin') {
+      const backend = healthyBackends[roundRobinIndex % healthyBackends.length];
+      roundRobinIndex += 1;
+      return backend;
+    }
+
+    if (strategy === 'least-connections') {
+      const minimumActiveRequests = Math.min(
+        ...healthyBackends.map((backend) => backend.activeRequests)
+      );
+      const leastConnectedBackends = healthyBackends.filter(
+        (backend) => backend.activeRequests === minimumActiveRequests
+      );
+      const backend =
+        leastConnectedBackends[roundRobinIndex % leastConnectedBackends.length];
+      roundRobinIndex += 1;
+      return backend;
     }
 
     return healthyBackends[hashClientIp(clientIp) % healthyBackends.length];
@@ -146,6 +180,7 @@ function createLoadBalancer({
   return {
     port,
     backends,
+    strategy,
     server,
     close,
     getBackendStates: () =>
@@ -179,5 +214,7 @@ module.exports = {
   DEFAULT_HEALTH_CHECK_PATH,
   DEFAULT_HEALTH_CHECK_INTERVAL,
   DEFAULT_HEALTH_CHECK_TIMEOUT,
+  DEFAULT_STRATEGY,
+  ROUTING_STRATEGIES,
   createLoadBalancer
 };
