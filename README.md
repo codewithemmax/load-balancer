@@ -3,25 +3,27 @@
 A small HTTP reverse proxy written with Node.js. The project is being built
 incrementally to demonstrate common load-balancing strategies.
 
-## Current version: v2.0 — Health Checks and Failover
+## Current version: v3.0 — Least Connections
 
-Version 2.0 builds on the v1.0 round-robin baseline by checking backend
-availability and routing only to healthy backends.
+Version 3.0 builds on v2.0 by routing each request to the healthy backend with
+the fewest active requests.
 
-Requests are distributed sequentially across the configured backends:
+When healthy backends have the same number of active requests, a round-robin
+tie-breaker distributes requests between them:
 
 ```text
 Backend A -> Backend B -> Backend C -> Backend A
 ```
 
-The implementation stores one index and advances it with the modulo operator:
+The implementation tracks an active-request count for every backend:
 
 ```text
-nextIndex = (nextIndex + 1) % backends.length
+backend = healthy backend with the smallest activeRequests
 ```
 
-The reverse proxy accepts a client request, selects a healthy backend, forwards
-the request, and pipes the backend response back to the client.
+The reverse proxy accepts a client request, selects the least-connected
+healthy backend, increments its counter, forwards the request, and decrements
+the counter when the response finishes or the client connection closes.
 
 ### Default configuration
 
@@ -39,6 +41,11 @@ Backends that fail a health check are temporarily removed from rotation.
 Healthy backends continue receiving traffic, and failed backends are
 automatically added back after a later health check succeeds. If a request
 fails before the next health check, that backend is removed immediately.
+
+If multiple healthy backends have the same lowest active-request count, the
+tie-breaker rotates through those backends. This preserves predictable
+distribution for short requests while allowing long-running requests to
+influence later routing decisions.
 
 If no backend is healthy, the load balancer returns `503 Service Unavailable`.
 If a selected backend fails while handling a request, the load balancer returns
@@ -92,8 +99,16 @@ curl.exe http://localhost:3000/
 curl.exe http://localhost:3000/
 ```
 
-The responses should rotate through backends 3001, 3002, 3003, and then 3001
-again. This verifies the round-robin behavior.
+For short requests, responses should be distributed across the backends. To
+observe least-connections behavior, make one backend deliberately slow:
+
+```powershell
+node -e "require('http').createServer((req,res)=>setTimeout(()=>res.end('slow backend 3001'),3000)).listen(3001)"
+```
+
+Send concurrent requests while that backend is still processing. New
+requests should prefer the healthy backends with fewer active requests instead
+of blindly following a fixed sequence.
 
 To verify failover, stop one backend with `Ctrl+C`. Wait for the next health
 check, then send requests through port `3000`. Requests should continue to be
@@ -111,7 +126,7 @@ The response should have status `503 Service Unavailable`.
 
 ## Analytics and observability plan
 
-The current v2.0 implementation does not collect analytics yet. The best
+The current v3.0 implementation does not collect analytics yet. The best
 approach is to add observability in stages, without mixing it into the routing
 algorithm:
 
@@ -152,7 +167,7 @@ authorization headers, request bodies, or other sensitive data.
 - Use modulo arithmetic to loop back to the first backend.
 - Validate that the reverse proxy can pipe requests and responses.
 
-### v2.0: Active Health Checks and Failover
+### v2.0: Active Health Checks and Failover (complete)
 
 - Periodically request a health endpoint such as `GET /health`.
 - Temporarily remove failed backends from the routing pool.
@@ -163,13 +178,16 @@ authorization headers, request bodies, or other sensitive data.
 This version is implemented. Health checks run every five seconds by default,
 with a two-second timeout.
 
-### v3.0: Least Connections
+### v3.0: Least Connections (current)
 
 - Route each request to the backend with the fewest active requests.
 - Increment a backend's connection count when a request starts.
 - Decrement it when the response completes or the client socket closes.
 - Compare the behavior with round robin when requests have different
   processing times.
+
+This version is implemented. It retains v2.0 health checks and failover while
+using active-request counts for routing.
 
 ### v4.0: IP Hashing and Sticky Sessions
 
@@ -180,5 +198,5 @@ with a two-second timeout.
 
 ## Project status
 
-v2.0 is currently in scope. Versions 3.0 and 4.0 document the intended
+v3.0 is currently in scope. Version 4.0 documents the intended
 learning path and are not promises that those features are already available.

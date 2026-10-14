@@ -24,12 +24,32 @@ function createLoadBalancer({
   const backendStates = backends.map((backend) => ({
     ...backend,
     healthy: true,
-    checking: false
+    checking: false,
+    activeRequests: 0
   }));
-  let nextBackend = 0;
+  let tieBreakerIndex = 0;
 
   function getHealthyBackends() {
     return backendStates.filter((backend) => backend.healthy);
+  }
+
+  function selectBackend() {
+    const healthyBackends = getHealthyBackends();
+    if (healthyBackends.length === 0) {
+      return null;
+    }
+
+    const minimumActiveRequests = Math.min(
+      ...healthyBackends.map((backend) => backend.activeRequests)
+    );
+    const leastConnectedBackends = healthyBackends.filter(
+      (backend) => backend.activeRequests === minimumActiveRequests
+    );
+    const backend = leastConnectedBackends[
+      tieBreakerIndex % leastConnectedBackends.length
+    ];
+    tieBreakerIndex += 1;
+    return backend;
   }
 
   function checkBackend(backend) {
@@ -71,15 +91,25 @@ function createLoadBalancer({
   }
 
   const server = http.createServer((request, response) => {
-    const healthyBackends = getHealthyBackends();
-    if (healthyBackends.length === 0) {
+    const backend = selectBackend();
+    if (!backend) {
       response.writeHead(503, { 'Content-Type': 'text/plain' });
       response.end('No healthy backends available');
       return;
     }
 
-    const backend = healthyBackends[nextBackend % healthyBackends.length];
-    nextBackend = (nextBackend + 1) % healthyBackends.length;
+    backend.activeRequests += 1;
+    let requestReleased = false;
+    const releaseRequest = () => {
+      if (requestReleased) {
+        return;
+      }
+      requestReleased = true;
+      backend.activeRequests -= 1;
+    };
+
+    response.once('finish', releaseRequest);
+    response.once('close', releaseRequest);
 
     const proxyRequest = http.request(
       {
@@ -96,6 +126,7 @@ function createLoadBalancer({
     );
 
     proxyRequest.on('error', () => {
+      releaseRequest();
       backend.healthy = false;
       if (!response.headersSent) {
         response.writeHead(502, { 'Content-Type': 'text/plain' });
@@ -121,7 +152,14 @@ function createLoadBalancer({
     port,
     backends,
     server,
-    close
+    close,
+    getBackendStates: () =>
+      backendStates.map(({ host, port, healthy, activeRequests }) => ({
+        host,
+        port,
+        healthy,
+        activeRequests
+      }))
   };
 }
 
